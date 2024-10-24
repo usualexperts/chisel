@@ -69,6 +69,18 @@ func (p *Proxy) listen() error {
 	return nil
 }
 
+func (p *Proxy) restartTCPListener() error {
+	if p.remote.LocalProto != "tcp" {
+		return p.Errorf("local proto is not TCP")
+	}
+	p.Infof("Closing TCP listener")
+	if err := p.tcp.Close() ; err != nil {
+		p.Infof("Error closing TCP listener: %v", err)
+	}
+	p.Infof("Restarting TCP listener")
+	return p.listen()
+}
+
 //Run enables the proxy and blocks while its active,
 //close the proxy by cancelling the context.
 func (p *Proxy) Run(ctx context.Context) error {
@@ -95,36 +107,74 @@ func (p *Proxy) runStdio(ctx context.Context) error {
 	}
 }
 
-func (p *Proxy) runTCP(ctx context.Context) error {
-	done := make(chan struct{})
-	//implements missing net.ListenContext
-	go func() {
-		select {
-		case <-ctx.Done():
-			p.tcp.Close()
-		case <-done:
-		}
-	}()
-	for {
-		src, err := p.tcp.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				//listener closed
-				err = nil
-			default:
-				p.Infof("Accept error: %s", err)
-			}
-			close(done)
-			return err
-		}
-		go p.pipeRemote(ctx, src)
-	}
-}
+// func (p *Proxy) runTCP(ctx context.Context) error {
+// 	done := make(chan struct{})
+// 	//implements missing net.ListenContext
+// 	go func() {
+// 		select {
+// 		case <-ctx.Done():
+// 			p.tcp.Close()
+// 		case <-done:
+// 		}
+// 	}()
+// 	for {
+// 		src, err := p.tcp.Accept()
+// 		if err != nil {
+// 			select {
+// 			case <-ctx.Done():
+// 				//listener closed
+// 				err = nil
+// 			default:
+// 				p.Infof("Accept error: %s", err)
+// 			}
+// 			close(done)
+// 			return err
+// 		}
+// 		go p.pipeRemote(ctx, src)
+// 	}
+// }
 
 func (p *Proxy) pipeRemote(ctx context.Context, src io.ReadWriteCloser) {
 	defer src.Close()
 
+	dst, l := p.openSshChannel(ctx)
+	if dst == nil {
+		return
+	}
+
+	// p.mu.Lock()
+	// p.count++
+	// cid := p.count
+	// p.mu.Unlock()
+
+	// l := p.Fork("conn#%d", cid)
+	// l.Debugf("Open")
+	// sshConn := p.sshTun.getSSH(ctx)
+	// if sshConn == nil {
+	// 	l.Debugf("No remote connection")
+	// 	return
+	// }
+	// //ssh request for tcp connection for this proxy's remote
+	// dst, reqs, err := sshConn.OpenChannel("chisel", []byte(p.remote.Remote()))
+	// if err != nil {
+	// 	l.Infof("Stream error: %s", err)
+	// 	return
+	// }
+	// go ssh.DiscardRequests(reqs)
+
+	//then pipe
+	s, r := cio.Pipe(src, dst)
+	l.Debugf("Close (sent %s received %s)", sizestr.ToString(s), sizestr.ToString(r))
+}
+
+func (p *Proxy) pipeRemoteSshAlreadyOpened(src, dst io.ReadWriteCloser, l *cio.Logger) {
+	defer src.Close()
+	s, r := cio.Pipe(src, dst)
+	l.Debugf("Close (sent %s received %s)", sizestr.ToString(s), sizestr.ToString(r))
+}
+
+
+func (p *Proxy) openSshChannel(ctx context.Context) (io.ReadWriteCloser, *cio.Logger) {
 	p.mu.Lock()
 	p.count++
 	cid := p.count
@@ -132,19 +182,21 @@ func (p *Proxy) pipeRemote(ctx context.Context, src io.ReadWriteCloser) {
 
 	l := p.Fork("conn#%d", cid)
 	l.Debugf("Open")
+
 	sshConn := p.sshTun.getSSH(ctx)
 	if sshConn == nil {
 		l.Debugf("No remote connection")
-		return
+		return nil, l
 	}
 	//ssh request for tcp connection for this proxy's remote
 	dst, reqs, err := sshConn.OpenChannel("chisel", []byte(p.remote.Remote()))
 	if err != nil {
 		l.Infof("Stream error: %s", err)
-		return
+		return nil, l
 	}
 	go ssh.DiscardRequests(reqs)
-	//then pipe
-	s, r := cio.Pipe(src, dst)
-	l.Debugf("Close (sent %s received %s)", sizestr.ToString(s), sizestr.ToString(r))
+	return dst, l
 }
+
+
+
